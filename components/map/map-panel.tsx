@@ -11,7 +11,7 @@ import {
   fetchBoundary,
   type ResumenDistritoCategoriaItem,
 } from "@/lib/api";
-import { colorForTotal, colorForPct, paletteForCategorias } from "@/lib/color-scale";
+import { colorForTotal, colorForPct, paletteForCategorias, COLOR_MODES } from "@/lib/color-scale";
 
 const FETCH_DEBOUNCE_MS = 250;
 
@@ -27,6 +27,14 @@ const PERU_ZOOM = 5.3;
 
 type DistritoFeature = GeoJSON.Feature<GeoJSON.Geometry, { IDDIST: string; NOMBDEP: string; NOMBPROV: string; NOMBDIST: string }>;
 type DepartamentoFeature = GeoJSON.Feature<GeoJSON.Geometry, { NOMBDEP: string }>;
+
+type LegendState =
+  | { kind: "gradient"; label: string; scale: "total" | "pct"; max: number }
+  | { kind: "categorical"; label: string; items: { categoria: string; color: string }[] };
+
+function formatHa(v: number) {
+  return `${v.toLocaleString("es-PE", { maximumFractionDigits: 0 })} ha`;
+}
 
 /** Opacidad de un distrito segun el filtro geografico activo -- sin
  * departamento elegido, se pinta todo el país (vista nacional por defecto);
@@ -67,6 +75,37 @@ function boundsOfGeometry(geom: GeoJSON.Geometry): [[number, number], [number, n
   ];
 }
 
+function LegendBox({ legend }: { legend: LegendState }) {
+  if (legend.kind === "gradient") {
+    const stops = [0, 0.25, 0.5, 0.75, 1].map((t) =>
+      legend.scale === "total" ? colorForTotal(t * legend.max, legend.max) : colorForPct(t)
+    );
+    return (
+      <div className="pointer-events-none absolute bottom-3 left-3 w-48 rounded-md bg-black/70 p-2.5 text-[10px] text-white/80 backdrop-blur">
+        <div className="mb-1.5 font-mono text-[9px] tracking-widest text-white/50 uppercase">{legend.label}</div>
+        <div className="h-2 w-full rounded-full" style={{ background: `linear-gradient(90deg, ${stops.join(",")})` }} />
+        <div className="mt-1 flex justify-between font-mono text-white/60">
+          <span>0</span>
+          <span>{legend.scale === "total" ? formatHa(legend.max) : "100%"}</span>
+        </div>
+      </div>
+    );
+  }
+  return (
+    <div className="pointer-events-none absolute bottom-3 left-3 w-52 rounded-md bg-black/70 p-2.5 text-[10px] text-white/80 backdrop-blur">
+      <div className="mb-1.5 font-mono text-[9px] tracking-widest text-white/50 uppercase">{legend.label}</div>
+      <ul className="flex max-h-40 flex-col gap-1 overflow-y-auto">
+        {legend.items.map((it) => (
+          <li key={it.categoria} className="flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 shrink-0 rounded-sm" style={{ backgroundColor: it.color }} />
+            <span className="truncate">{it.categoria}</span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 export function MapPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
@@ -78,6 +117,7 @@ export function MapPanel() {
   const departamentosGeoRef = useRef<GeoJSON.FeatureCollection<GeoJSON.Geometry, DepartamentoFeature["properties"]> | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [legend, setLegend] = useState<LegendState | null>(null);
 
   useEffect(() => {
     is3DActiveRef.current = is3DActive;
@@ -225,6 +265,7 @@ export function MapPanel() {
           ? fetchResumenDistritos(depto, apiFiltros, controller.signal).then((items) => {
               const porDistrito = new Map(items.map((it) => [`${it.departamento}|${it.provincia}|${it.distrito}`, it.area_ha]));
               const max = Math.max(1, ...items.map((it) => it.area_ha));
+              setLegend({ kind: "gradient", label: "Intensidad total", scale: "total", max });
               features.forEach((f) => {
                 const key = `${f.properties.NOMBDEP}|${f.properties.NOMBPROV}|${f.properties.NOMBDIST}`;
                 map.setFeatureState(
@@ -238,6 +279,7 @@ export function MapPanel() {
             })
           : colorMode === "bpp"
             ? fetchResumenDistritosPorCategoria("bpp", depto, apiFiltros, controller.signal).then((items) => {
+                setLegend({ kind: "gradient", label: "% del área en BPP", scale: "pct", max: 1 });
                 const porDistrito = new Map<string, { si: number; total: number }>();
                 for (const item of items) {
                   const key = `${item.departamento}|${item.provincia}|${item.distrito}`;
@@ -259,6 +301,11 @@ export function MapPanel() {
             : fetchResumenDistritosPorCategoria(colorMode, depto, apiFiltros, controller.signal).then((items) => {
                 const categorias = [...new Set(items.map((it) => it.categoria))].sort();
                 const paleta = paletteForCategorias(categorias);
+                setLegend({
+                  kind: "categorical",
+                  label: COLOR_MODES.find((m) => m.id === colorMode)?.label ?? colorMode,
+                  items: categorias.map((categoria) => ({ categoria, color: paleta.get(categoria) ?? "#6b9e80" })),
+                });
                 const dominante = new Map<string, ResumenDistritoCategoriaItem>();
                 for (const item of items) {
                   const key = `${item.departamento}|${item.provincia}|${item.distrito}`;
@@ -359,6 +406,7 @@ export function MapPanel() {
           Cargando datos…
         </div>
       )}
+      {legend && <LegendBox legend={legend} />}
     </div>
   );
 }

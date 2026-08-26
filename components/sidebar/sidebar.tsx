@@ -8,6 +8,7 @@ import { useProvincias } from "@/lib/use-provincias";
 import { useDistritos } from "@/lib/use-distritos";
 import { useScene3D } from "@/lib/scene3d-context";
 import { COLOR_MODES } from "@/lib/color-scale";
+import { useRegionResumen, type BreakdownEntry } from "@/lib/use-region-resumen";
 
 function FilterSelect({
   label,
@@ -200,6 +201,72 @@ function ColorModeSwitcher() {
   );
 }
 
+function formatHa(v: number) {
+  return `${v.toLocaleString("es-PE", { maximumFractionDigits: 1 })} ha`;
+}
+
+function BreakdownList({ items, total }: { items: BreakdownEntry[]; total: number }) {
+  if (items.length === 0) return <span className="text-[11px] text-white/40">Sin datos.</span>;
+  return (
+    <ul className="flex flex-col gap-1">
+      {items.map((it) => (
+        <li key={it.categoria} className="flex items-center justify-between gap-2 text-[11px]">
+          <span className="truncate text-white/80">{it.categoria}</span>
+          <span className="shrink-0 font-mono text-white/50">
+            {formatHa(it.area_ha)} {total > 0 && <span className="text-white/30">({((it.area_ha / total) * 100).toFixed(0)}%)</span>}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+
+/** Datos reales (no solo colores) de la región elegida -- respeta los mismos
+ * filtros del sidebar, solo aparece cuando hay un departamento elegido
+ * (mismo criterio que el resaltado del mapa). */
+function RegionResumenPanel() {
+  const { departamento, provincia, distrito, apiFiltros } = useFilters();
+  const { data, loading } = useRegionResumen(departamento, provincia, distrito, apiFiltros);
+
+  if (!departamento) return null;
+
+  return (
+    <PanelSection label={`Datos de ${[departamento, provincia, distrito].filter(Boolean).join(" › ")}`}>
+      {loading && !data && <p className="text-[11px] text-white/40">Cargando…</p>}
+      {data && (
+        <div className="flex flex-col gap-3">
+          <div className="grid grid-cols-2 gap-2">
+            <div className="rounded-sm border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="font-mono text-[9px] tracking-widest text-white/40 uppercase">Área total</div>
+              <div className="font-mono text-sm text-white">{formatHa(data.totalHa)}</div>
+            </div>
+            <div className="rounded-sm border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="font-mono text-[9px] tracking-widest text-white/40 uppercase">Eventos</div>
+              <div className="font-mono text-sm text-white">{data.eventos.toLocaleString("es-PE")}</div>
+            </div>
+            <div className="col-span-2 rounded-sm border border-white/10 bg-white/5 px-2 py-1.5">
+              <div className="font-mono text-[9px] tracking-widest text-white/40 uppercase">% en BPP</div>
+              <div className="font-mono text-sm text-white">{(data.bppPct * 100).toFixed(1)}%</div>
+            </div>
+          </div>
+          <div>
+            <div className="mb-1 font-mono text-[9px] tracking-widest text-white/40 uppercase">Clase</div>
+            <BreakdownList items={data.clase} total={data.totalHa} />
+          </div>
+          <div>
+            <div className="mb-1 font-mono text-[9px] tracking-widest text-white/40 uppercase">Tenencia</div>
+            <BreakdownList items={data.tenencia} total={data.totalHa} />
+          </div>
+          <div>
+            <div className="mb-1 font-mono text-[9px] tracking-widest text-white/40 uppercase">Cobertura</div>
+            <BreakdownList items={data.cobertura} total={data.totalHa} />
+          </div>
+        </div>
+      )}
+    </PanelSection>
+  );
+}
+
 function PanelSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div className="border-b border-white/10 px-4 py-3.5">
@@ -250,6 +317,7 @@ export function Sidebar() {
           <PanelSection label="Colorear mapa por">
             <ColorModeSwitcher />
           </PanelSection>
+          <RegionResumenPanel />
         </div>
       </aside>
     </>
