@@ -6,9 +6,12 @@ import "maplibre-gl/dist/maplibre-gl.css";
 import { useScene3D } from "@/lib/scene3d-context";
 import { useFilters } from "@/lib/filters-context";
 import {
+  fetchResumen,
+  fetchResumenPorCategoria,
   fetchResumenDistritos,
   fetchResumenDistritosPorCategoria,
   fetchBoundary,
+  type ResumenCategoriaItem,
   type ResumenDistritoCategoriaItem,
 } from "@/lib/api";
 import { colorForTotal, colorForPct, paletteForCategorias, COLOR_MODES } from "@/lib/color-scale";
@@ -17,6 +20,7 @@ const FETCH_DEBOUNCE_MS = 250;
 
 const SOURCE_ID = "departamentos";
 const LINE_LAYER = "departamentos-line";
+const DEPT_FILL_LAYER = "departamentos-fill";
 
 const DIST_SOURCE_ID = "distritos";
 const DIST_FILL_LAYER = "distritos-fill";
@@ -118,6 +122,17 @@ export function MapPanel() {
   const [mapLoaded, setMapLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
   const [legend, setLegend] = useState<LegendState | null>(null);
+  // Los distritos (1,161 poligonos + su query nacional agregada, ~8.5s en
+  // frio) son el costo real de la carga inicial lenta -- se difieren hasta
+  // que el usuario los pide explicitamente (boton "Ver distritos") o elige
+  // un departamento puntual (el drill-down a un solo depto ya era rapido,
+  // no es lo que se queria arreglar). La vista nacional siempre a nivel
+  // distrito fue un pedido explicito del cliente (ver memoria del proyecto)
+  // -- este cambio lo relaja por performance; queda pendiente confirmar con
+  // el cliente si el compromiso (regiones primero, distritos on-demand) le
+  // sirve tal cual o prefiere otra solucion (ej. precalentar cache).
+  const [distritosLoaded, setDistritosLoaded] = useState(false);
+  const distritosLoadingRef = useRef(false);
 
   useEffect(() => {
     is3DActiveRef.current = is3DActive;
@@ -155,16 +170,24 @@ export function MapPanel() {
     map.addControl(new maplibregl.NavigationControl(), "top-right");
 
     map.on("load", async () => {
-      // Fuente de departamentos: ya no tiene relleno propio (el color de los
-      // 5 modos de "Colorear mapa por" ahora es SIEMPRE a nivel distrito),
-      // solo se usa para la línea de contorno regional -- en un color/grosor
-      // bien distinto al de las líneas de distrito, para que se lea la
-      // jerarquía (región gruesa y clara / distrito fino y oscuro) de un
-      // vistazo, pedido explícito del cliente.
+      // Fuente de departamentos: vista por defecto -- tiene su PROPIO
+      // relleno (agregado a nivel departamento, 15 filas, rápido) y la
+      // línea de contorno regional. Los distritos (1,161 polígonos + query
+      // nacional pesada) ya NO se cargan aquí, ver loadDistritos() abajo.
       map.addSource(SOURCE_ID, {
         type: "geojson",
         data: "/geo/departamentos.geojson",
         promoteId: "NOMBDEP",
+      });
+      map.addLayer({
+        id: DEPT_FILL_LAYER,
+        type: "fill",
+        source: SOURCE_ID,
+        paint: {
+          "fill-color": ["coalesce", ["feature-state", "color"], "#0a1410"],
+          "fill-opacity": 0.85,
+          "fill-opacity-transition": { duration: 400 },
+        },
       });
       map.addLayer({
         id: LINE_LAYER,
@@ -173,63 +196,23 @@ export function MapPanel() {
         paint: { "line-color": "#48cae4", "line-opacity": 0.65, "line-width": 1.6 },
       });
 
-      // Distritos: visibles desde el arranque, SIN filtro (los 15
-      // departamentos a la vez) -- es la vista por defecto. Agregada
-      // DESPUES de departamentos a propósito (MapLibre dibuja en orden de
-      // agregado, así el relleno de distrito queda arriba del fondo, pero
-      // la LINEA de departamento -- agregada despues todavia, ver abajo --
-      // queda por encima de ambos).
-      map.addSource(DIST_SOURCE_ID, {
-        type: "geojson",
-        data: "/geo/distritos.geojson",
-        promoteId: "IDDIST",
-      });
-      map.addLayer(
-        {
-          id: DIST_FILL_LAYER,
-          type: "fill",
-          source: DIST_SOURCE_ID,
-          paint: {
-            "fill-color": ["coalesce", ["feature-state", "color"], "#0a1410"],
-            "fill-opacity": ["coalesce", ["feature-state", "opacity"], 0.85],
-            "fill-opacity-transition": { duration: 400 },
-          },
-        },
-        LINE_LAYER
-      );
-      map.addLayer(
-        {
-          id: DIST_LINE_LAYER,
-          type: "line",
-          source: DIST_SOURCE_ID,
-          paint: { "line-color": "#0a120e", "line-opacity": 0.6, "line-width": 0.6 },
-        },
-        LINE_LAYER
-      );
-
-      // Clic en un distrito (modo 3D activo) resuelve al DEPARTAMENTO al que
-      // pertenece -- el holograma 3D sigue siendo a nivel departamento, no
-      // se extruye un distrito individual (fuera de alcance de esta ronda).
-      map.on("click", DIST_FILL_LAYER, (e) => {
+      // Clic en un departamento (modo 3D, vista por defecto sin distritos
+      // cargados todavía) selecciona directo -- el feature clicado YA es el
+      // departamento, no hace falta resolverlo como en el caso de distrito.
+      map.on("click", DEPT_FILL_LAYER, (e) => {
         if (!is3DActiveRef.current) return;
-        const distFeature = e.features?.[0] as MapGeoJSONFeature | undefined;
-        const nombdep = distFeature?.properties?.NOMBDEP as string | undefined;
-        if (!nombdep) return;
-        const depFeature = departamentosGeoRef.current?.features.find((f) => f.properties.NOMBDEP === nombdep);
-        if (depFeature) selectRegionRef.current(depFeature as unknown as MapGeoJSONFeature);
+        const depFeature = e.features?.[0] as MapGeoJSONFeature | undefined;
+        if (depFeature) selectRegionRef.current(depFeature);
       });
-      map.on("mouseenter", DIST_FILL_LAYER, () => {
+      map.on("mouseenter", DEPT_FILL_LAYER, () => {
         map.getCanvas().style.cursor = is3DActiveRef.current ? "pointer" : "";
       });
-      map.on("mouseleave", DIST_FILL_LAYER, () => {
+      map.on("mouseleave", DEPT_FILL_LAYER, () => {
         map.getCanvas().style.cursor = "";
       });
 
       const geojsonRes = await fetch("/geo/departamentos.geojson");
       departamentosGeoRef.current = await geojsonRes.json();
-
-      const distritosRes = await fetch("/geo/distritos.geojson");
-      distritosGeoRef.current = await distritosRes.json();
 
       setMapLoaded(true);
     });
@@ -240,16 +223,168 @@ export function MapPanel() {
     };
   }, []);
 
-  // Color del choropleta de distritos -- vista nacional por defecto (los 15
+  // Carga diferida de distritos: se llama desde el botón "Ver distritos" o
+  // automáticamente al elegir un departamento puntual en el sidebar (ese
+  // drill-down ya era rápido antes, seguir usando distrito ahí no perjudica
+  // nada). Idempotente -- si ya existe la fuente, no hace nada.
+  async function loadDistritos() {
+    const map = mapRef.current;
+    if (!map || distritosLoadingRef.current || map.getSource(DIST_SOURCE_ID)) return;
+    distritosLoadingRef.current = true;
+
+    map.addSource(DIST_SOURCE_ID, {
+      type: "geojson",
+      data: "/geo/distritos.geojson",
+      promoteId: "IDDIST",
+    });
+    map.addLayer(
+      {
+        id: DIST_FILL_LAYER,
+        type: "fill",
+        source: DIST_SOURCE_ID,
+        paint: {
+          "fill-color": ["coalesce", ["feature-state", "color"], "#0a1410"],
+          "fill-opacity": ["coalesce", ["feature-state", "opacity"], 0.85],
+          "fill-opacity-transition": { duration: 400 },
+        },
+      },
+      LINE_LAYER
+    );
+    map.addLayer(
+      {
+        id: DIST_LINE_LAYER,
+        type: "line",
+        source: DIST_SOURCE_ID,
+        paint: { "line-color": "#0a120e", "line-opacity": 0.6, "line-width": 0.6 },
+      },
+      LINE_LAYER
+    );
+
+    // Clic en un distrito (modo 3D activo) resuelve al DEPARTAMENTO al que
+    // pertenece -- el holograma 3D sigue siendo a nivel departamento, no se
+    // extruye un distrito individual (fuera de alcance de esta ronda).
+    map.on("click", DIST_FILL_LAYER, (e) => {
+      if (!is3DActiveRef.current) return;
+      const distFeature = e.features?.[0] as MapGeoJSONFeature | undefined;
+      const nombdep = distFeature?.properties?.NOMBDEP as string | undefined;
+      if (!nombdep) return;
+      const depFeature = departamentosGeoRef.current?.features.find((f) => f.properties.NOMBDEP === nombdep);
+      if (depFeature) selectRegionRef.current(depFeature as unknown as MapGeoJSONFeature);
+    });
+    map.on("mouseenter", DIST_FILL_LAYER, () => {
+      map.getCanvas().style.cursor = is3DActiveRef.current ? "pointer" : "";
+    });
+    map.on("mouseleave", DIST_FILL_LAYER, () => {
+      map.getCanvas().style.cursor = "";
+    });
+    // El relleno departamental deja de mostrarse una vez hay distrito --
+    // evita dos capas de color superpuestas (la línea de depto se conserva).
+    map.setLayoutProperty(DEPT_FILL_LAYER, "visibility", "none");
+
+    const distritosRes = await fetch("/geo/distritos.geojson");
+    distritosGeoRef.current = await distritosRes.json();
+    distritosLoadingRef.current = false;
+    setDistritosLoaded(true);
+  }
+
+  useEffect(() => {
+    if (mapLoaded && departamento && !distritosLoaded) {
+      void loadDistritos();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mapLoaded, departamento, distritosLoaded]);
+
+  // Color del choropleta a nivel DEPARTAMENTO -- vista por defecto, antes de
+  // que se carguen los distritos (ver loadDistritos arriba). Mismos 5 modos
+  // de "Colorear mapa por", pero agregados sobre solo 15 filas (rápido,
+  // sin la query nacional de distritos que causaba la carga lenta inicial).
+  useEffect(() => {
+    if (!mapLoaded || distritosLoaded) return;
+    const map = mapRef.current;
+    if (!map) return;
+    const features = departamentosGeoRef.current?.features ?? [];
+    if (features.length === 0) return;
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      setLoading(true);
+
+      const coloring: Promise<void> =
+        colorMode === "total_ha"
+          ? fetchResumen(apiFiltros, controller.signal).then((items) => {
+              const porDepto = new Map(items.map((it) => [it.departamento, it.area_ha]));
+              const max = Math.max(1, ...items.map((it) => it.area_ha));
+              setLegend({ kind: "gradient", label: "Intensidad total", scale: "total", max });
+              features.forEach((f) => {
+                map.setFeatureState(
+                  { source: SOURCE_ID, id: f.properties.NOMBDEP },
+                  { color: colorForTotal(porDepto.get(f.properties.NOMBDEP) ?? 0, max) }
+                );
+              });
+            })
+          : colorMode === "bpp"
+            ? fetchResumenPorCategoria("bpp", apiFiltros, controller.signal).then((items) => {
+                setLegend({ kind: "gradient", label: "% del área en BPP", scale: "pct", max: 1 });
+                const porDepto = new Map<string, { si: number; total: number }>();
+                for (const item of items) {
+                  const acc = porDepto.get(item.departamento) ?? { si: 0, total: 0 };
+                  acc.total += item.area_ha;
+                  if (item.categoria === "Sí") acc.si += item.area_ha;
+                  porDepto.set(item.departamento, acc);
+                }
+                features.forEach((f) => {
+                  const acc = porDepto.get(f.properties.NOMBDEP);
+                  const pct = acc && acc.total > 0 ? acc.si / acc.total : 0;
+                  map.setFeatureState({ source: SOURCE_ID, id: f.properties.NOMBDEP }, { color: colorForPct(pct) });
+                });
+              })
+            : fetchResumenPorCategoria(colorMode, apiFiltros, controller.signal).then((items) => {
+                const categorias = [...new Set(items.map((it) => it.categoria))].sort();
+                const paleta = paletteForCategorias(categorias);
+                setLegend({
+                  kind: "categorical",
+                  label: COLOR_MODES.find((m) => m.id === colorMode)?.label ?? colorMode,
+                  items: categorias.map((categoria) => ({ categoria, color: paleta.get(categoria) ?? "#6b9e80" })),
+                });
+                const dominante = new Map<string, ResumenCategoriaItem>();
+                for (const item of items) {
+                  const actual = dominante.get(item.departamento);
+                  if (!actual || item.area_ha > actual.area_ha) dominante.set(item.departamento, item);
+                }
+                features.forEach((f) => {
+                  const item = dominante.get(f.properties.NOMBDEP);
+                  map.setFeatureState(
+                    { source: SOURCE_ID, id: f.properties.NOMBDEP },
+                    { color: item ? (paleta.get(item.categoria) ?? "#6b9e80") : "#0a1410" }
+                  );
+                });
+              });
+
+      coloring
+        .catch((err: unknown) => {
+          if (err instanceof Error && err.name !== "AbortError") console.error(err);
+        })
+        .finally(() => setLoading(false));
+    }, FETCH_DEBOUNCE_MS);
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [mapLoaded, distritosLoaded, colorMode, apiFiltros]);
+
+  // Color del choropleta de distritos -- vista nacional (los 15
   // departamentos a la vez, via /mapa/resumen-distritos(-por-categoria) sin
   // `departamento`), o acotada a uno cuando el usuario elige un departamento
-  // en el sidebar. Cubre los 5 modos de "Colorear mapa por": intensidad
-  // total, categoria dominante por area (Clase/Tenencia/Cobertura) y % en
-  // BPP -- todos a nivel distrito, mismo patron debounce+abort ya usado en
-  // v1 (forntend_sisbosque_etl). El maximo/paleta para la escala de color se
-  // calcula sobre el conjunto que se pidio (nacional o de 1 depto).
+  // en el sidebar. Solo corre una vez cargados los distritos (botón "Ver
+  // distritos" o drill-down a un departamento). Cubre los 5 modos de
+  // "Colorear mapa por": intensidad total, categoria dominante por area
+  // (Clase/Tenencia/Cobertura) y % en BPP -- todos a nivel distrito, mismo
+  // patron debounce+abort ya usado en v1 (forntend_sisbosque_etl). El
+  // maximo/paleta para la escala de color se calcula sobre el conjunto que
+  // se pidio (nacional o de 1 depto).
   useEffect(() => {
-    if (!mapLoaded) return;
+    if (!mapLoaded || !distritosLoaded) return;
     const map = mapRef.current;
     if (!map) return;
     const features = distritosGeoRef.current?.features ?? [];
@@ -336,7 +471,7 @@ export function MapPanel() {
       clearTimeout(timeout);
       controller.abort();
     };
-  }, [mapLoaded, colorMode, departamento, provincia, distrito, apiFiltros]);
+  }, [mapLoaded, distritosLoaded, colorMode, departamento, provincia, distrito, apiFiltros]);
 
   // Zoom de la camara segun departamento/provincia/distrito elegidos -- al
   // distrito puntual si esta elegido, si no a la provincia, si no al
@@ -407,6 +542,15 @@ export function MapPanel() {
         </div>
       )}
       {legend && <LegendBox legend={legend} />}
+      {mapLoaded && !distritosLoaded && (
+        <button
+          type="button"
+          onClick={() => void loadDistritos()}
+          className="absolute bottom-10 right-3 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white/80 backdrop-blur transition hover:bg-black/80 hover:text-white"
+        >
+          Ver distritos
+        </button>
+      )}
     </div>
   );
 }
