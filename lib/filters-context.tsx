@@ -20,6 +20,12 @@ type FiltersState = {
   anoMax: number;
   /** No es un filtro de datos: controla cómo se colorea el mapa. */
   colorMode: ColorMode;
+  /** Tipos de capa de referencia activos (ANP, comunidad_nativa, etc.) --
+   * NO se limpia al cambiar de departamento a propósito (mismo criterio que
+   * `eventosOn` en MapPanel: el toggle se mantiene, solo se refetch para el
+   * depto nuevo). Sí requiere `departamento` para tener sentido (el
+   * endpoint lo exige), eso lo maneja MapPanel, no el estado en sí. */
+  capasActivas: string[];
 };
 
 type FiltersContextValue = FiltersState & {
@@ -36,6 +42,7 @@ type FiltersContextValue = FiltersState & {
   setColorMode: (v: ColorMode) => void;
   /** Fija ambos extremos a la vez (un año puntual: min=max, o un rango). */
   setAnoRange: (min: number, max: number) => void;
+  toggleCapa: (tipo: string) => void;
   /** Forma que esperan /mapa/resumen y /mapa/poligonos -- a proposito SIN
    * `departamento`/`provincia`/`distrito`: /mapa/resumen siempre agrega los
    * 15 departamentos (es lo que colorea el choropleth completo); esos 3
@@ -59,6 +66,11 @@ export function FiltersProvider({ children }: { children: React.ReactNode }) {
   const [anoMin, setAnoMin] = useState(ANO_MIN);
   const [anoMax, setAnoMax] = useState(ANO_MAX);
   const [colorMode, setColorMode] = useState<ColorMode>("total_ha");
+  const [capasActivas, setCapasActivas] = useState<string[]>([]);
+
+  function toggleCapa(tipo: string) {
+    setCapasActivas((prev) => (prev.includes(tipo) ? prev.filter((t) => t !== tipo) : [...prev, tipo]));
+  }
 
   function setDepartamento(v: string) {
     setDepartamentoRaw(v);
@@ -101,6 +113,7 @@ export function FiltersProvider({ children }: { children: React.ReactNode }) {
     anoMin,
     anoMax,
     colorMode,
+    capasActivas,
     setDepartamento,
     setProvincia,
     setDistrito,
@@ -111,6 +124,7 @@ export function FiltersProvider({ children }: { children: React.ReactNode }) {
     setDensilicit,
     setColorMode,
     setAnoRange,
+    toggleCapa,
     apiFiltros,
   };
 

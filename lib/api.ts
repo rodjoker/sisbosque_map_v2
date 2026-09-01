@@ -166,6 +166,36 @@ export async function fetchPoligonoDetalle(id: number, signal?: AbortSignal): Pr
   return res.json();
 }
 
+export type CapaReferenciaTipo = { tipo: string; nombre: string; color: string; total: number };
+
+/** Catálogo de las 12 capas de referencia (ANP, comunidades, concesiones,
+ * etc.) -- solo metadata (color/total), sin geometría. */
+export async function fetchCapasReferencia(signal?: AbortSignal): Promise<CapaReferenciaTipo[]> {
+  const res = await fetch(`${API_BASE}/mapa/capas`, { signal });
+  if (!res.ok) throw new Error(`GET /mapa/capas -> ${res.status}`);
+  return res.json();
+}
+
+export type CapaReferenciaFeature = GeoJSONFeature & {
+  properties: { id: number; tipo: string; nombre: string | null; atributos: Record<string, unknown>; area_ha: number | null };
+};
+
+export type CapaReferenciaResponse = { type: "FeatureCollection"; total: number; features: CapaReferenciaFeature[] };
+
+/** Geometría real de una capa de referencia, acotada al departamento --
+ * sin límite de seguridad (a diferencia de fetchPoligonos): la tabla
+ * completa son ~75k filas, acotado a un depto el peor caso queda en unos
+ * pocos miles. */
+export async function fetchCapaReferencia(
+  tipo: string,
+  departamento: string,
+  signal?: AbortSignal
+): Promise<CapaReferenciaResponse> {
+  const res = await fetch(`${API_BASE}/mapa/capas/${tipo}?departamento=${encodeURIComponent(departamento)}`, { signal });
+  if (!res.ok) throw new Error(`GET /mapa/capas/${tipo} -> ${res.status}`);
+  return res.json();
+}
+
 export type ResumenDepartamentoItem = { departamento: string; eventos: number; area_ha: number };
 
 /** Total filtrado por departamento -- reemplaza al fetch por-departamento de

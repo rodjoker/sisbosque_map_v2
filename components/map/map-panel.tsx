@@ -13,11 +13,13 @@ import {
   fetchBoundary,
   fetchPoligonos,
   fetchPoligonoDetalle,
+  fetchCapaReferencia,
   PoligonosLimitError,
   type ResumenCategoriaItem,
   type ResumenDistritoCategoriaItem,
   type PoligonoDetalle,
 } from "@/lib/api";
+import { useCapasReferencia } from "@/lib/use-capas-referencia";
 import { colorForTotal, colorForPct, paletteForCategorias, COLOR_MODES } from "@/lib/color-scale";
 
 const FETCH_DEBOUNCE_MS = 250;
@@ -122,7 +124,9 @@ export function MapPanel() {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const { is3DActive, selectRegion, selectedRegion, isClosing } = useScene3D();
-  const { departamento, provincia, distrito, apiFiltros, colorMode } = useFilters();
+  const { departamento, provincia, distrito, apiFiltros, colorMode, capasActivas } = useFilters();
+  const { capas: capasCatalogo } = useCapasReferencia();
+  const capaLayersCreatedRef = useRef<Set<string>>(new Set());
   const is3DActiveRef = useRef(is3DActive);
   const selectRegionRef = useRef(selectRegion);
   const distritosGeoRef = useRef<GeoJSON.FeatureCollection<GeoJSON.Geometry, DistritoFeature["properties"]> | null>(null);
@@ -479,6 +483,76 @@ export function MapPanel() {
       });
     return () => controller.abort();
   }, [eventoFicha]);
+
+  // Capas de referencia (ANP, comunidades, concesiones, etc.) -- a
+  // diferencia de eventos/distritos NO dependen de apiFiltros (son limites
+  // administrativos, no eventos de deforestacion filtrables por año/clase/
+  // tenencia), solo del departamento (el endpoint lo exige) y de que tipos
+  // esten activos en el sidebar. Se agregan SIN "before" a proposito -- van
+  // siempre al tope del stack, por encima de distritos/eventos, para que se
+  // note que son una capa aparte superpuesta (mismo criterio visual que se
+  // le mostró al usuario en el mockup).
+  function ensureCapaReferenciaLayer(tipo: string, color: string) {
+    const map = mapRef.current;
+    if (!map || map.getSource(`capa-${tipo}`)) return;
+    map.addSource(`capa-${tipo}`, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
+    map.addLayer({
+      id: `capa-${tipo}-fill`,
+      type: "fill",
+      source: `capa-${tipo}`,
+      paint: { "fill-color": color, "fill-opacity": 0.45 },
+    });
+    map.addLayer({
+      id: `capa-${tipo}-line`,
+      type: "line",
+      source: `capa-${tipo}`,
+      paint: { "line-color": color, "line-opacity": 0.9, "line-width": 1.2 },
+    });
+    capaLayersCreatedRef.current.add(tipo);
+  }
+
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    // Oculta las que ya existen pero dejaron de estar activas (o no hay
+    // departamento) -- barato, no depende del fetch de abajo.
+    for (const tipo of capaLayersCreatedRef.current) {
+      const visible = !!departamento && capasActivas.includes(tipo);
+      if (map.getLayer(`capa-${tipo}-fill`)) {
+        map.setLayoutProperty(`capa-${tipo}-fill`, "visibility", visible ? "visible" : "none");
+        map.setLayoutProperty(`capa-${tipo}-line`, "visibility", visible ? "visible" : "none");
+      }
+    }
+    if (!departamento || capasActivas.length === 0) return;
+
+    const colorPorTipo = new Map(capasCatalogo.map((c) => [c.tipo, c.color]));
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      capasActivas.forEach((tipo) => {
+        const color = colorPorTipo.get(tipo);
+        if (!color) return; // catalogo (colores) todavia no cargo
+        ensureCapaReferenciaLayer(tipo, color);
+        map.setLayoutProperty(`capa-${tipo}-fill`, "visibility", "visible");
+        map.setLayoutProperty(`capa-${tipo}-line`, "visibility", "visible");
+        fetchCapaReferencia(tipo, departamento, controller.signal)
+          .then((res) => {
+            (map.getSource(`capa-${tipo}`) as maplibregl.GeoJSONSource | undefined)?.setData({
+              type: "FeatureCollection",
+              features: res.features,
+            });
+          })
+          .catch((err: unknown) => {
+            if (err instanceof Error && err.name !== "AbortError") console.error(err);
+          });
+      });
+    }, FETCH_DEBOUNCE_MS);
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [mapLoaded, departamento, capasActivas, capasCatalogo]);
 
   // Color del choropleta a nivel DEPARTAMENTO -- vista por defecto, antes de
   // que se carguen los distritos (ver loadDistritos arriba). Mismos 5 modos

@@ -9,6 +9,7 @@ import { useDistritos } from "@/lib/use-distritos";
 import { useScene3D } from "@/lib/scene3d-context";
 import { COLOR_MODES } from "@/lib/color-scale";
 import { useRegionResumen, type BreakdownEntry } from "@/lib/use-region-resumen";
+import { useCapasReferencia } from "@/lib/use-capas-referencia";
 
 function FilterSelect({
   label,
@@ -201,6 +202,54 @@ function ColorModeSwitcher() {
   );
 }
 
+/** Switcher de capas de referencia (ANP, comunidades, concesiones, etc.) --
+ * requiere un departamento elegido (el endpoint `/mapa/capas/{tipo}` lo
+ * exige), mismo criterio que RegionResumenPanel: no se muestra sin depto en
+ * vez de mostrar toggles deshabilitados. */
+function CapasReferenciaSwitcher() {
+  const { departamento, capasActivas, toggleCapa } = useFilters();
+  const { capas, loading } = useCapasReferencia();
+
+  if (!departamento) {
+    return <p className="text-[11px] text-white/40">Elige un departamento para ver las capas de referencia.</p>;
+  }
+  if (loading) return <p className="text-[11px] text-white/40">Cargando…</p>;
+
+  return (
+    <div className="flex flex-col gap-0.5">
+      {capas.map((capa) => {
+        const activa = capasActivas.includes(capa.tipo);
+        return (
+          <button
+            key={capa.tipo}
+            type="button"
+            onClick={() => toggleCapa(capa.tipo)}
+            className="flex items-center gap-2.5 rounded-sm px-1.5 py-1.5 text-left transition-colors hover:bg-white/5"
+          >
+            <span
+              className="h-2.5 w-2.5 shrink-0 rounded-sm"
+              style={{ backgroundColor: capa.color, boxShadow: "inset 0 0 0 1px rgba(255,255,255,.15)" }}
+            />
+            <span className="min-w-0 flex-1">
+              <span className={`block truncate text-xs ${activa ? "text-white" : "text-white/70"}`}>{capa.nombre}</span>
+              <span className="block font-mono text-[10px] text-white/35">{capa.total.toLocaleString("es-PE")} polígonos</span>
+            </span>
+            <span
+              className="relative h-4 w-7 shrink-0 rounded-full transition-colors"
+              style={{ backgroundColor: activa ? capa.color : "rgba(255,255,255,.12)" }}
+            >
+              <span
+                className="absolute top-0.5 h-3 w-3 rounded-full bg-[#0a120e] transition-all"
+                style={{ left: activa ? "14px" : "2px" }}
+              />
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 function formatHa(v: number) {
   return `${v.toLocaleString("es-PE", { maximumFractionDigits: 1 })} ha`;
 }
@@ -316,6 +365,9 @@ export function Sidebar() {
           </PanelSection>
           <PanelSection label="Colorear mapa por">
             <ColorModeSwitcher />
+          </PanelSection>
+          <PanelSection label="Capas de referencia">
+            <CapasReferenciaSwitcher />
           </PanelSection>
           <RegionResumenPanel />
         </div>
