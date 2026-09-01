@@ -11,8 +11,12 @@ import {
   fetchResumenDistritos,
   fetchResumenDistritosPorCategoria,
   fetchBoundary,
+  fetchPoligonos,
+  fetchPoligonoDetalle,
+  PoligonosLimitError,
   type ResumenCategoriaItem,
   type ResumenDistritoCategoriaItem,
+  type PoligonoDetalle,
 } from "@/lib/api";
 import { colorForTotal, colorForPct, paletteForCategorias, COLOR_MODES } from "@/lib/color-scale";
 
@@ -25,6 +29,10 @@ const DEPT_FILL_LAYER = "departamentos-fill";
 const DIST_SOURCE_ID = "distritos";
 const DIST_FILL_LAYER = "distritos-fill";
 const DIST_LINE_LAYER = "distritos-line";
+
+const EVENTOS_SOURCE_ID = "eventos";
+const EVENTOS_FILL_LAYER = "eventos-fill";
+const EVENTOS_LINE_LAYER = "eventos-line";
 
 const PERU_CENTER: [number, number] = [-74.0, -8.0];
 const PERU_ZOOM = 5.3;
@@ -133,6 +141,22 @@ export function MapPanel() {
   // sirve tal cual o prefiere otra solucion (ej. precalentar cache).
   const [distritosLoaded, setDistritosLoaded] = useState(false);
   const distritosLoadingRef = useRef(false);
+  // Geometria real de cada evento de deforestacion (Tarea 1 del plan de
+  // "polígono individual" -- ver forma real de la tala, no el agregado por
+  // distrito). Toggle manual (no automatico) porque el endpoint exige un
+  // departamento elegido y puede superar el limite de seguridad de 20k del
+  // backend si hay pocos filtros activos -- se le pide al usuario que lo
+  // active a proposito, no se le muestra de entrada un error.
+  const [eventosOn, setEventosOn] = useState(false);
+  const [eventosLimite, setEventosLimite] = useState<{ total: number; limit: number } | null>(null);
+  const [exportando, setExportando] = useState(false);
+  // Ficha de detalle al hacer clic en un evento individual (Tarea 2).
+  // `coords` es el punto exacto donde se hizo clic (e.lngLat) -- suficiente
+  // para verificacion en campo sin tener que calcular el centroide del
+  // polígono client-side.
+  const [eventoFicha, setEventoFicha] = useState<{ id: number; coords: { lng: number; lat: number } } | null>(null);
+  const [eventoDetalle, setEventoDetalle] = useState<PoligonoDetalle | null>(null);
+  const [eventoDetalleError, setEventoDetalleError] = useState(false);
 
   useEffect(() => {
     is3DActiveRef.current = is3DActive;
@@ -293,6 +317,168 @@ export function MapPanel() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mapLoaded, departamento, distritosLoaded]);
+
+  // Crea la fuente/capas de eventos individuales la primera vez que se
+  // activa el toggle -- sin "before" a proposito: siempre se agrega AL
+  // TOPE del stack de capas (por encima de distritos/departamentos, que ya
+  // existen para cuando esto se usa, dado que requiere un departamento
+  // elegido y ese caso ya carga distritos automaticamente).
+  function ensureEventosLayer() {
+    const map = mapRef.current;
+    if (!map || map.getSource(EVENTOS_SOURCE_ID)) return;
+    map.addSource(EVENTOS_SOURCE_ID, {
+      type: "geojson",
+      data: { type: "FeatureCollection", features: [] },
+    });
+    map.addLayer({
+      id: EVENTOS_FILL_LAYER,
+      type: "fill",
+      source: EVENTOS_SOURCE_ID,
+      paint: { "fill-color": "#ff6b4a", "fill-opacity": 0.75 },
+    });
+    map.addLayer({
+      id: EVENTOS_LINE_LAYER,
+      type: "line",
+      source: EVENTOS_SOURCE_ID,
+      paint: { "line-color": "#ffd9cc", "line-opacity": 0.9, "line-width": 0.5 },
+    });
+
+    // Clic en un evento individual abre su ficha (Tarea 2) -- a diferencia
+    // de departamentos/distritos, esto NUNCA depende del modo 3D, siempre
+    // esta activo mientras la capa de eventos este visible.
+    map.on("click", EVENTOS_FILL_LAYER, (e) => {
+      const f = e.features?.[0] as MapGeoJSONFeature | undefined;
+      const id = f?.properties?.id as number | undefined;
+      if (id === undefined) return;
+      setEventoFicha({ id, coords: { lng: e.lngLat.lng, lat: e.lngLat.lat } });
+    });
+    map.on("mouseenter", EVENTOS_FILL_LAYER, () => {
+      map.getCanvas().style.cursor = "pointer";
+    });
+    map.on("mouseleave", EVENTOS_FILL_LAYER, () => {
+      map.getCanvas().style.cursor = "";
+    });
+  }
+
+  // Sin departamento elegido el endpoint no aplica (exige uno) -- si el
+  // usuario limpia el filtro con el toggle prendido, se apaga solo.
+  useEffect(() => {
+    if (!departamento && eventosOn) setEventosOn(false);
+  }, [departamento, eventosOn]);
+
+  // Fetch + render de los eventos reales -- mismo patron debounce+abort que
+  // el resto del mapa. Un 413 (mas de 20k poligonos con el filtro activo)
+  // NO se reintenta: se apaga la capa y se le pide al usuario mas filtros.
+  useEffect(() => {
+    const map = mapRef.current;
+    if (!map || !mapLoaded) return;
+
+    if (!eventosOn || !departamento) {
+      setEventosLimite(null);
+      if (map.getLayer(EVENTOS_FILL_LAYER)) {
+        map.setLayoutProperty(EVENTOS_FILL_LAYER, "visibility", "none");
+        map.setLayoutProperty(EVENTOS_LINE_LAYER, "visibility", "none");
+      }
+      return;
+    }
+
+    ensureEventosLayer();
+    map.setLayoutProperty(EVENTOS_FILL_LAYER, "visibility", "visible");
+    map.setLayoutProperty(EVENTOS_LINE_LAYER, "visibility", "visible");
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => {
+      setLoading(true);
+      fetchPoligonos(departamento, apiFiltros, controller.signal)
+        .then((res) => {
+          setEventosLimite(null);
+          (map.getSource(EVENTOS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData({
+            type: "FeatureCollection",
+            features: res.features,
+          });
+        })
+        .catch((err: unknown) => {
+          if (err instanceof PoligonosLimitError) {
+            setEventosLimite({ total: err.total, limit: err.limit });
+            (map.getSource(EVENTOS_SOURCE_ID) as maplibregl.GeoJSONSource | undefined)?.setData({
+              type: "FeatureCollection",
+              features: [],
+            });
+            return;
+          }
+          if (err instanceof Error && err.name !== "AbortError") console.error(err);
+        })
+        .finally(() => setLoading(false));
+    }, FETCH_DEBOUNCE_MS);
+
+    return () => {
+      clearTimeout(timeout);
+      controller.abort();
+    };
+  }, [mapLoaded, eventosOn, departamento, apiFiltros]);
+
+  // Exportar a GeoJSON (Tarea 3) -- independiente del toggle "Ver eventos
+  // reales", pide directo /mapa/poligonos con el filtro activo (mismo
+  // limite de 20k que la visualizacion: exportar 2M+ features de un
+  // departamento grande sin filtrar no es razonable ni para el navegador
+  // ni para QGIS/ArcGIS del otro lado -- se le pide al usuario acotar el
+  // filtro, mismo mensaje que ya usa la capa visual).
+  async function exportarGeoJSON() {
+    if (!departamento || exportando) return;
+    setExportando(true);
+    try {
+      const res = await fetchPoligonos(departamento, apiFiltros);
+      setEventosLimite(null);
+      const blob = new Blob([JSON.stringify({ type: "FeatureCollection", features: res.features })], {
+        type: "application/geo+json",
+      });
+      const url = URL.createObjectURL(blob);
+      const fecha = new Date().toISOString().slice(0, 10);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `sisbosque-eventos-${departamento.toLowerCase()}-${fecha}.geojson`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      if (err instanceof PoligonosLimitError) {
+        setEventosLimite({ total: err.total, limit: err.limit });
+      } else {
+        console.error(err);
+      }
+    } finally {
+      setExportando(false);
+    }
+  }
+
+  // Se cierra la ficha si se apaga la capa de eventos (ya no tiene sentido
+  // mostrar el detalle de un polígono que dejó de estar visible).
+  useEffect(() => {
+    if (!eventosOn) setEventoFicha(null);
+  }, [eventosOn]);
+
+  // Fetch del detalle completo (Tarea 2) -- /mapa/poligonos/{id} en vez de
+  // reusar las properties ya cargadas en el feature: trae departamento y
+  // codigou (catastro minero) que la lista no incluye, y es la fuente
+  // "oficial" de la ficha en vez de inferirla del GeoJSON de la capa.
+  useEffect(() => {
+    if (!eventoFicha) {
+      setEventoDetalle(null);
+      setEventoDetalleError(false);
+      return;
+    }
+    const controller = new AbortController();
+    setEventoDetalle(null);
+    setEventoDetalleError(false);
+    fetchPoligonoDetalle(eventoFicha.id, controller.signal)
+      .then(setEventoDetalle)
+      .catch((err: unknown) => {
+        if (err instanceof Error && err.name === "AbortError") return;
+        setEventoDetalleError(true);
+      });
+    return () => controller.abort();
+  }, [eventoFicha]);
 
   // Color del choropleta a nivel DEPARTAMENTO -- vista por defecto, antes de
   // que se carguen los distritos (ver loadDistritos arriba). Mismos 5 modos
@@ -542,7 +728,78 @@ export function MapPanel() {
         </div>
       )}
       {legend && <LegendBox legend={legend} />}
-      {mapLoaded && !distritosLoaded && (
+      {eventoFicha && (
+        <div className="absolute top-24 right-3 w-64 rounded-md bg-black/80 p-3 text-[11px] text-white/80 backdrop-blur">
+          <div className="mb-2 flex items-center justify-between">
+            <span className="font-mono text-[9px] tracking-widest text-white/50 uppercase">Evento #{eventoFicha.id}</span>
+            <button
+              type="button"
+              onClick={() => setEventoFicha(null)}
+              className="text-white/50 hover:text-white"
+              aria-label="Cerrar ficha"
+            >
+              ✕
+            </button>
+          </div>
+          {eventoDetalleError && <div className="text-red-300">No se pudo cargar el detalle.</div>}
+          {!eventoDetalleError && !eventoDetalle && <div className="text-white/50">Cargando…</div>}
+          {eventoDetalle && (
+            <dl className="grid grid-cols-2 gap-x-2 gap-y-1">
+              <dt className="text-white/50">Año</dt>
+              <dd>{eventoDetalle.anio}</dd>
+              <dt className="text-white/50">Tipo</dt>
+              <dd>{eventoDetalle.tipo_perdida ?? "Sin dato"}</dd>
+              <dt className="text-white/50">Clase</dt>
+              <dd>{eventoDetalle.clase ?? "Sin dato"}</dd>
+              <dt className="text-white/50">Tenencia</dt>
+              <dd>{eventoDetalle.tenencia ?? "Sin dato"}</dd>
+              <dt className="text-white/50">Cobertura</dt>
+              <dd>{eventoDetalle.leyenda_mb ?? "Sin dato"}</dd>
+              <dt className="text-white/50">BPP</dt>
+              <dd>{eventoDetalle.bpp ? "Sí" : "No"}</dd>
+              <dt className="text-white/50">Cultivos ilícitos</dt>
+              <dd>{eventoDetalle.densilicit ? "Sí" : "No"}</dd>
+              <dt className="text-white/50">Área</dt>
+              <dd>{formatHa(eventoDetalle.area_ha)}</dd>
+              <dt className="col-span-2 mt-1 text-white/50">Coordenadas (punto clicado)</dt>
+              <dd className="col-span-2 font-mono">
+                {eventoFicha.coords.lat.toFixed(5)}, {eventoFicha.coords.lng.toFixed(5)}
+              </dd>
+            </dl>
+          )}
+        </div>
+      )}
+      {eventosLimite && (
+        <div className="pointer-events-none absolute top-12 left-3 max-w-xs rounded-md bg-black/70 px-3 py-2 text-[11px] text-white/80 backdrop-blur">
+          {eventosLimite.total.toLocaleString("es-PE")} eventos superan el límite de{" "}
+          {eventosLimite.limit.toLocaleString("es-PE")} — aplica más filtros (año, clase, tenencia, provincia,
+          distrito) para verlos.
+        </div>
+      )}
+      {mapLoaded && departamento && (
+        <button
+          type="button"
+          onClick={() => void exportarGeoJSON()}
+          disabled={exportando}
+          className="absolute bottom-20 right-3 rounded-full bg-black/70 px-3 py-1.5 text-xs text-white/80 backdrop-blur transition hover:bg-black/80 hover:text-white disabled:opacity-50"
+        >
+          {exportando ? "Exportando…" : "Exportar GeoJSON"}
+        </button>
+      )}
+      {mapLoaded && departamento && (
+        <button
+          type="button"
+          onClick={() => setEventosOn((v) => !v)}
+          className={`absolute bottom-10 right-3 rounded-full px-3 py-1.5 text-xs backdrop-blur transition ${
+            eventosOn
+              ? "bg-[#ff6b4a]/90 text-black hover:bg-[#ff6b4a]"
+              : "bg-black/70 text-white/80 hover:bg-black/80 hover:text-white"
+          }`}
+        >
+          {eventosOn ? "Ocultar eventos reales" : "Ver eventos reales"}
+        </button>
+      )}
+      {mapLoaded && !distritosLoaded && !departamento && (
         <button
           type="button"
           onClick={() => void loadDistritos()}

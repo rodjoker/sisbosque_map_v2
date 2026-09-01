@@ -69,7 +69,7 @@ export type PoligonoFiltros = {
   densilicit?: boolean;
 };
 
-function filtrosToParams(f: PoligonoFiltros): URLSearchParams {
+export function filtrosToParams(f: PoligonoFiltros): URLSearchParams {
   const p = new URLSearchParams();
   if (f.anioMin !== undefined) p.set("anio_min", String(f.anioMin));
   if (f.anioMax !== undefined) p.set("anio_max", String(f.anioMax));
@@ -94,6 +94,75 @@ export type FiltrosOpciones = {
 export async function fetchFiltros(signal?: AbortSignal): Promise<FiltrosOpciones> {
   const res = await fetch(`${API_BASE}/mapa/filtros`, { signal });
   if (!res.ok) throw new Error(`GET /mapa/filtros -> ${res.status}`);
+  return res.json();
+}
+
+export class PoligonosLimitError extends Error {
+  constructor(
+    public total: number,
+    public limit: number
+  ) {
+    super(`${total} poligonos superan el limite de ${limit}`);
+    this.name = "PoligonosLimitError";
+  }
+}
+
+export type PoligonoEventoFeature = GeoJSONFeature & {
+  properties: {
+    id: number;
+    anio: number;
+    tipo_perdida: string | null;
+    clase: string | null;
+    tenencia: string | null;
+    leyenda_mb: string | null;
+    bpp: boolean;
+    densilicit: boolean;
+    area_ha: number;
+  };
+};
+
+export type PoligonosResponse = { type: "FeatureCollection"; total: number; features: PoligonoEventoFeature[] };
+
+/** Geometria real de cada evento de deforestacion (no el agregado por
+ * distrito) -- siempre acotado a UN departamento (requerido por el backend)
+ * y sujeto al limite de seguridad de 20k features: si el filtro activo trae
+ * mas que eso, el backend responde 413 y hay que pedirle al usuario que
+ * agregue mas filtros en vez de reintentar. */
+export async function fetchPoligonos(
+  departamento: string,
+  filtros: PoligonoFiltros,
+  signal?: AbortSignal
+): Promise<PoligonosResponse> {
+  const params = filtrosToParams(filtros);
+  const res = await fetch(`${API_BASE}/mapa/poligonos?departamento=${encodeURIComponent(departamento)}&${params}`, { signal });
+  if (res.status === 413) {
+    const body = (await res.json().catch(() => null)) as { detail?: string } | null;
+    const match = body?.detail?.match(/^(\d+) poligonos.*limite (\d+)/);
+    throw new PoligonosLimitError(match ? Number(match[1]) : 0, match ? Number(match[2]) : 20000);
+  }
+  if (!res.ok) throw new Error(`GET /mapa/poligonos -> ${res.status}`);
+  return res.json();
+}
+
+export type PoligonoDetalle = {
+  id: number;
+  departamento: string;
+  anio: number;
+  tipo_perdida: string | null;
+  clase: string | null;
+  tenencia: string | null;
+  leyenda_mb: string | null;
+  bpp: boolean;
+  densilicit: boolean;
+  codigou: string | null;
+  area_ha: number;
+  trayectoria_id: number | null;
+  geometry: GeoJSON.Geometry;
+};
+
+export async function fetchPoligonoDetalle(id: number, signal?: AbortSignal): Promise<PoligonoDetalle> {
+  const res = await fetch(`${API_BASE}/mapa/poligonos/${id}`, { signal });
+  if (!res.ok) throw new Error(`GET /mapa/poligonos/${id} -> ${res.status}`);
   return res.json();
 }
 
