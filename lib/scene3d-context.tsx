@@ -9,7 +9,7 @@ export type SelectedRegion = {
 };
 
 /** Duración de la animación de salida (paneles + bloque 3D + mapa). Se
- * comparte vía import con region-scene-3d.tsx y hologram-overlay.tsx para
+ * comparte vía import con data-core-3d.tsx y hologram-overlay.tsx para
  * que el desmontaje real (este timeout) y las animaciones CSS/Three.js
  * terminen sincronizadas. Mismo patrón que la demo v1 (forntend_sisbosque_etl). */
 export const EXIT_DURATION_MS = 500;

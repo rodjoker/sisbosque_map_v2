@@ -21,6 +21,15 @@ export async function fetchDepartamentos(signal?: AbortSignal): Promise<string[]
   return res.json();
 }
 
+export type DemoInfo = { demo: boolean; departamentos: string[] };
+
+/** Si el backend corre en modo demo, qué departamentos tienen datos cargados. */
+export async function fetchDemoInfo(signal?: AbortSignal): Promise<DemoInfo> {
+  const res = await fetch(`${API_BASE}/mapa/demo`, { signal });
+  if (!res.ok) throw new Error(`GET /mapa/demo -> ${res.status}`);
+  return res.json();
+}
+
 /** Serie completa (todos los años) de un departamento — /mapa/stats sin
  * `anio` delega en stats_service.get_departamento_serie (DynamoDB). */
 export async function fetchStatsSerie(departamento: string, signal?: AbortSignal): Promise<StatsItem[]> {

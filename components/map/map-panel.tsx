@@ -133,6 +133,14 @@ export function MapPanel() {
   const departamentosGeoRef = useRef<GeoJSON.FeatureCollection<GeoJSON.Geometry, DepartamentoFeature["properties"]> | null>(null);
   const [mapLoaded, setMapLoaded] = useState(false);
   const [loading, setLoading] = useState(true);
+  // Splash de la primera carga (frase + animación) -- se apaga apenas
+  // `loading` pasa a false por primera vez y ya no vuelve a mostrarse en
+  // cargas posteriores (cambios de filtro, etc.), esas siguen usando el
+  // pill chico de siempre.
+  const [firstLoadDone, setFirstLoadDone] = useState(false);
+  useEffect(() => {
+    if (!loading) setFirstLoadDone(true);
+  }, [loading]);
   const [legend, setLegend] = useState<LegendState | null>(null);
   // Los distritos (1,161 poligonos + su query nacional agregada, ~8.5s en
   // frio) son el costo real de la carga inicial lenta -- se difieren hasta
@@ -145,6 +153,10 @@ export function MapPanel() {
   // sirve tal cual o prefiere otra solucion (ej. precalentar cache).
   const [distritosLoaded, setDistritosLoaded] = useState(false);
   const distritosLoadingRef = useRef(false);
+  // El debounce de 250ms tiene sentido para no re-pedir en cada tecla de un
+  // filtro que cambia rápido -- pero en el primer render no hay nada que
+  // debouncear, y ese delay se sumaba directo al tiempo de la carga inicial.
+  const deptoColoringFirstRunRef = useRef(true);
   // Geometria real de cada evento de deforestacion (Tarea 1 del plan de
   // "polígono individual" -- ver forma real de la tala, no el agregado por
   // distrito). Toggle manual (no automatico) porque el endpoint exige un
@@ -197,6 +209,11 @@ export function MapPanel() {
     mapRef.current = map;
     map.addControl(new maplibregl.NavigationControl(), "top-right");
 
+    // Arranca en paralelo con la carga interna de MapLibre (el "load" de
+    // abajo) en vez de esperar a ese evento para recién ahí pedirlo -- son
+    // el mismo archivo estático, no hay razón para serializarlos.
+    const departamentosGeoPromise = fetch("/geo/departamentos.geojson").then((r) => r.json());
+
     map.on("load", async () => {
       // Fuente de departamentos: vista por defecto -- tiene su PROPIO
       // relleno (agregado a nivel departamento, 15 filas, rápido) y la
@@ -239,8 +256,7 @@ export function MapPanel() {
         map.getCanvas().style.cursor = "";
       });
 
-      const geojsonRes = await fetch("/geo/departamentos.geojson");
-      departamentosGeoRef.current = await geojsonRes.json();
+      departamentosGeoRef.current = await departamentosGeoPromise;
 
       setMapLoaded(true);
     });
@@ -565,6 +581,9 @@ export function MapPanel() {
     const features = departamentosGeoRef.current?.features ?? [];
     if (features.length === 0) return;
 
+    const delay = deptoColoringFirstRunRef.current ? 0 : FETCH_DEBOUNCE_MS;
+    deptoColoringFirstRunRef.current = false;
+
     const controller = new AbortController();
     const timeout = setTimeout(() => {
       setLoading(true);
@@ -625,7 +644,7 @@ export function MapPanel() {
           if (err instanceof Error && err.name !== "AbortError") console.error(err);
         })
         .finally(() => setLoading(false));
-    }, FETCH_DEBOUNCE_MS);
+    }, delay);
 
     return () => {
       clearTimeout(timeout);
@@ -795,7 +814,27 @@ export function MapPanel() {
           dimmed ? "pointer-events-none scale-105 opacity-25 blur-sm" : ""
         }`}
       />
-      {loading && (
+      {!firstLoadDone && (
+        <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center gap-5 bg-[#050807]">
+          <div className="flex items-center gap-2">
+            <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#8cc63f]" />
+            <span className="font-mono text-[10px] tracking-[0.3em] text-white/40 uppercase">Sisbosque</span>
+          </div>
+          <p className="max-w-sm px-6 text-center text-lg font-medium text-white/90">
+            {"Explora la deforestación amazónica con datos reales"
+              .split(" ")
+              .map((word, i) => (
+                <span key={i} className="splash-word" style={{ animationDelay: `${i * 90}ms` }}>
+                  {word}&nbsp;
+                </span>
+              ))}
+          </p>
+          <div className="h-px w-24 overflow-hidden rounded-full bg-white/10">
+            <div className="splash-bar h-full w-1/3 rounded-full bg-[#8cc63f]" />
+          </div>
+        </div>
+      )}
+      {loading && firstLoadDone && (
         <div className="pointer-events-none absolute top-3 left-3 flex items-center gap-2 rounded-full bg-black/70 px-3 py-1 text-xs text-white/70 backdrop-blur">
           <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-[#8cc63f]" />
           Cargando datos…
